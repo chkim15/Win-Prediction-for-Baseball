@@ -1,0 +1,614 @@
+---
+title: "Win Prediction for Baseball"
+author: "Chul Hee Kim"
+date: '2021/05/21'
+output: pdf_document
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(Lahman)) install.packages("Lahman", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(ggpubr)) install.packages("ggpubr", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(kableExtra)) install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(Lahman)
+library(randomForest)
+library(ggpubr)
+library(knitr)
+library(kableExtra)
+```
+
+## Introduction
+
+Baseball game is won by scoring more runs than the opponent. A team's mission is to maximize the runs scored and to 
+minimize the runs given up. To score more runs, batters need more hits (X1B, X2B, X3B, HR), walks (BB), hit by pitches (HBP), and fewer strikeouts (SO). On the other hand, pitchers basically need to prevent what batters try to accomplish and get outs for their teams. In this report, we will try to predict the number of wins a team can acquire, using the past +100 years of Major League Baseball (MLB) data. 
+
+The dataset used in this analysis is taken from _Lahman_ package. Among many dataset in the package, here we are only conerned
+with _Teams_ dataset, which contains the batting and pitching statistics along with general information such as the team's
+name, ballpark, and attendance from 1871 to 2019. 
+
+## Analysis 
+
+### Data Preprocessing
+
+* **Dataset 'Teams'**
+
+Let's take a look at the last row of the dataset.
+
+-------------------------------------------------------------------------------------------------
+```{r, echo=FALSE, comment=NA}
+Teams[nrow(Teams),]
+```
+-------------------------------------------------------------------------------------------------
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# Group 'Teams' data by 30 years
+Teams <- Teams %>% mutate(group = case_when(
+  yearID %in% c(1871:1900) ~ "1871~1900",
+  yearID %in% c(1901:1930) ~ "1901~1930",
+  yearID %in% c(1931:1960) ~ "1931~1960",
+  yearID %in% c(1961:1990) ~ "1961~1990",
+  yearID %in% c(1991:2019) ~ "1991~2019"
+))
+
+# Add columns for X1B (single), X123BA (Non-HR hits allowed), and SH (sacrifice hits)
+SH_table <- Batting %>% 
+  group_by(teamID, yearID) %>%
+  summarize(SH = sum(SH)) %>%
+  filter(!is.na(SH))
+
+Teams <- Teams %>% 
+  filter(yearID %in% c(1871:2019)) %>%
+  mutate(X1B = H - HR - X2B - X3B,
+         X123BA = HA - HRA) %>%
+  left_join(SH_table, by = c("teamID", "yearID")) %>%
+  select(yearID, W, R, X1B, X2B, X3B, HR, BB, SO, SB, HBP, SH, RA, X123BA, HRA, BBA, SOA, E, group)
+```
+
+
+There are total of 48 columns, and many of them are not necessary for our analysis, so we will retain the ones shown 
+in the table below. 
+
+```{r table1, echo=FALSE, results='asis'}
+tbl <- c("yearID, W, R, X1B, X2B, X3B, HR, BB, SO, SB, HBP, SH, RA, X123BA, HRA, BBA, SOA, E, group")
+
+kable(tbl, col.names = "Following 19 variables remain", caption = "Variables retained from Teams dataset", "latex") %>%
+  kable_styling(latex_options="hold_position")
+```
+
+Of course, columns such as _lgID_, _teamID_, _attendance_, and anything non-numeric are not relevant. Among the remaining,
+_Rank_, _G_, _Ghome_, _AB_, _CG_, _SHO_, _SV_, _IPouts_, and _DP_ are just the records of what happened, not something that 
+actually contributed to the team's winning. _FP_ is in percentage, so it is inappropriate to compare with the number of
+wins for the linear regression analysis. _ER_ and _ERA_ can be regarded as subsets of _RA_, so all these variables will
+be taken out for our analysis.
+
+Note that among the 19 selected, there are three variables not present in the original dataset: **X1B**, **X123BA**, **group**. 
+
+* X1B: H - X2B - X3B - HR
+* X123BA: HA - HRA
+* group: yearID (1871 ~ 2019) grouped by 30-year interval 
+
+Hits (H) include doubles (X2B), triples (X3B), and home runs (HR), and HA (Hits Allowed) include home runs allowed (HRA), so we better extract singles (X1B) and non-HR hits allowed (X123BA) to avoid duplication. 
+
+Since baseball has such a long history, there might be some noticeable pattern if we divide all years provided into groups.
+
+```{r table2, echo=FALSE, results='asis'}
+Teams %>% 
+  group_by(group) %>%
+  summarize(group = unique(group)) %>%
+  kable(caption = "Variable 'group' explained", format="latex") %>%
+  kable_styling(latex_options="hold_position")
+```
+
+Let's look at a plot showing X1B vs. W.
+
+(Go to next page)
+
+```{r plot1, echo=FALSE}
+p_outliers <- Teams %>% 
+  filter(yearID %in% c(1871:2019)) %>% 
+  ggplot(aes(X1B, W, color = group)) + geom_point() +
+  ggtitle("Singles(X1B) vs. Wins(W)")
+p_outliers
+```
+
+
+
+There are clearly some outliers, most of which are from 1871 ~ 1900. Although data is provided for those years, the rules
+of baseball were so much different from today, and even the number of games per year were too few back then. For example, 
+six balls were counted as base-on-balls as opposed four balls. So called "Modern Baseball" starts in 1901, so we will 
+exclude the data before 1901.
+
+(Go to next page)
+\newpage
+
+As mentioned before, baseball teams want to score more runs and give up fewer runs. Hence, wins should be very well 
+correlated with the run differential (R - RA).
+
+
+
+```{r plot2, echo=FALSE}
+p_rdiff <- Teams %>%
+  ggplot(aes(R-RA, W)) + geom_point() +
+  ggtitle("Run differential (R - RA) vs. Win")
+p_rdiff
+```
+
+
+
+We can divide the variables into two categories: the ones that influence R / the ones that influence RA.
+
+```{r table3, echo=FALSE, results='asis'}
+tbl_r <- c("R", "X1B, X2B, X3B, HR, BB, SO, SB, HBP, SH")
+tbl_ra <- c("RA", "X123BA, HRA, BBA, SOA, E")
+tbl <- rbind(tbl_r, tbl_ra)
+colnames(tbl) <- c("Run Differential", "Variables")
+rownames(tbl) <- NULL
+
+kable(tbl, caption = "Variables into two categories", format="latex") %>%
+  kable_styling(latex_options="hold_position")
+```
+
+
+
+In the next page, we will see the plots showing how each of these variables relate to W.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, results='asis'}
+# Exclude years 1871~1900 from dataset and from year group
+Teams <- Teams %>%
+  filter(yearID %in% c(1901:2019)) %>%
+  filter(!is.na(SO))  # filter out 16 NA entries for 'SO'
+```
+\newpage
+
+![Correlation of variables vs. W 1](figs/p_collect_1.png)
+![Correlation of variables vs. W 2](figs/p_collect_2.png)
+![Correlation of variables vs. W 3](figs/p_collect_3.png)
+
+Apart from the correlation between each variable and Win, we can notice that there is some differences among the
+year groups. For example, X2B, HR, SO, HRA, and SOA has increased over time while X3B, SH, and E decreased over time. 
+Leaving the data as it is and continuing with our analysis may be controversial, but we will move on for now and come back
+to this later. 
+
+Strangely, 'X1B vs. W' and 'X123BA vs. W' plots show some blue dots separated from the group. Just to acknowledge what 
+is going on, we will look at a plot of 'X1B vs. W' with years from 1981 to 2000, which corresponds to the blue group.
+
+(Go to next page)
+
+```{r plot3, echo=FALSE}
+p_1981 <- Teams %>% filter(yearID %in% c(1981:2000)) %>%
+  ggplot(aes(X1B,W)) +
+  geom_point(aes(color = ifelse(yearID %in% c(1981,1994), 'red', 'black'))) + 
+  scale_color_identity() +
+  labs(title = "What happened in 1981 and 1994-95? (shown is red)", x = "Singles (1B)", y = "Wins (W)")
+p_1981
+```
+In 1981, 713 games were canceled, and in 1994-1995, 948 games were canceled all because of MLB lockout. But, since
+these numbers are due to fewer games played and should not interfere with our linear regression analysis, we will 
+leave them as they are. 
+
+Lastly, HBP does not seem to be correlated with win at all and is unavailable for many data points, so it will not be
+used in our analysis.
+
+Our final _Teams_ dataset looks as follows (showing the last six rows):
+```{r, echo=FALSE}
+Teams <- Teams %>% select(-HBP)
+tail(Teams) %>% kable(caption="Teams Dataset") %>% 
+  kable_styling(latex_options=c("scale_down" ,"hold_position"))
+```
+
+(Go to next page)
+\newpage
+
+### Modeling
+
+Before we start building our models, we will first leave out 30% of the data as the validation set for our final test. 
+Remaining 70% (prediction set) is again divided into two groups: the training set (70%) and the test set (30%). 
+These are used to find the best-performing model, and once we find the final model, it is again trained with the 
+prediction set and tested with the validation set. 
+
+In terms of choosing an algorithm, the linear regression is the most intuitive choice, and we will try our first model 
+with only the batting stats. Root Mean Square Error (RMSE) and adjusted R-squared are two metrics that will be used to
+compare results of the different models.
+
+```{r, warning=FALSE, echo=FALSE}
+# Create prediction set and validation set
+set.seed(1, sample.kind="Rounding")
+validation_index <- createDataPartition(y = Teams$W, times = 1, p = 0.3, list = FALSE)
+prediction_set <- Teams[-validation_index,]
+validation_set <- Teams[validation_index,]
+
+# Create train set and test set
+set.seed(25, sample.kind="Rounding")
+test_index <- createDataPartition(y = prediction_set$W, times = 1, p = 0.3, list = FALSE)
+train_set <- prediction_set[-test_index,]
+test_set <- prediction_set[test_index,]
+
+# Model using only batting stat
+fit <- lm(W ~ X1B + X2B + X3B + HR + BB + SO + SB + SH, data = train_set)
+y_hat <- predict(fit, test_set)
+RMSE_0 <- sqrt(mean((y_hat - test_set$W)^2)) #> 10.7529
+summary_0 <- summary(fit)
+
+# Model using all variables
+fit <- lm(W ~ X1B + X2B + X3B + HR + BB + SO + SB + SH + X123BA + HRA + BBA + SOA + E, data = train_set)
+y_hat <- predict(fit, test_set)
+RMSE_1 <- sqrt(mean((y_hat - test_set$W)^2)) #> 6.3000
+summary_1 <- summary(fit)
+
+# Model after removing SO
+fit <- lm(W ~ X1B + X2B + X3B + HR + BB + SB + SH + X123BA + HRA + BBA + SOA + E, data = train_set)
+y_hat <- predict(fit, test_set)
+RMSE_2 <- sqrt(mean((y_hat - test_set$W)^2)) #> 6.2859
+summary_2 <- summary(fit)
+
+# Just checking how random forest performs
+fit <- randomForest(W ~ X1B + X2B + X3B + HR + BB + SB + SH + X123BA + HRA + BBA + SOA + E, data = train_set)
+y_hat <- predict(fit, test_set)
+RMSE_3 <- sqrt(mean((y_hat - test_set$W)^2)) #> 7.7628
+
+# Model including R and RA
+fit <- lm(W ~ R + RA + X1B + X2B + X3B + HR + BB + SB + X123BA + HRA + BBA + SOA + E, data = train_set)
+y_hat <- predict(fit, test_set)
+RMSE_4 <- sqrt(mean((y_hat - test_set$W)^2)) #> 4.6790
+summary_4 <- summary(fit)
+varimp <- varImp(fit)
+```
+
+```{r result, echo=FALSE, comment=NA}
+result <- tibble(Variables="X1B, X2B, X3B, HR, BB, SO, SB, SH", RMSE=RMSE_0,
+                 Adjusted_R_squred=summary_0$adj.r.squared)
+result %>% kable(caption="RMSE Table 1") %>% 
+  kable_styling(latex_options="hold_position")
+```
+
+Below is the summary of the first model:
+
+--------------------------------------------------------------
+```{r, echo=FALSE, comment=NA}
+summary_0
+```
+--------------------------------------------------------------
+Let's try using both batting and pitching stats variables in our second model:
+
+
+```{r result2, echo=FALSE, comment=NA}
+result <- bind_rows(result, tibble(Variables="X1B, X2B, X3B, HR, BB, SO, SB, SH, X123BA, HRA, BBA, SOA, E", RMSE=RMSE_1,
+                 Adjusted_R_squred=summary_1$adj.r.squared))
+result %>% kable(caption="RMSE Table 2") %>% 
+  kable_styling(latex_options="hold_position")
+```
+\newpage
+
+--------------------------------------------------------------
+```{r, echo=FALSE, comment=NA}
+summary_1
+```
+--------------------------------------------------------------
+Note that RMSE decreased and adjusted R-squared increased significantly from the first model. The summary indicates that
+_SO_ is not as significant as others, so we try the third model without _SO_.
+
+```{r result3, echo=FALSE, comment=NA}
+result <- bind_rows(result, tibble(Variables="X1B, X2B, X3B, HR, BB, SB, SH, X123BA, HRA, BBA, SOA, E", RMSE=RMSE_2,
+                 Adjusted_R_squred=summary_2$adj.r.squared))
+result %>% kable(caption="RMSE Table 3") %>% 
+  kable_styling(latex_options="hold_position")
+```
+\newpage
+
+--------------------------------------------------------------
+```{r, echo=FALSE, comment=NA}
+summary_2
+```
+--------------------------------------------------------------
+Both RMSE and adjusted R-squared are essentially the same as the second model, so we will keep _SO_ out of the model.
+
+For the purpose of experimenting, let's see how random forest performs, leaving the variables same as the third model. 
+
+```{r result4, echo=FALSE, comment=NA}
+result_2 <- tibble(Model=c("Linear Regression", "Random Forest"), RMSE=c(RMSE_2,RMSE_3))
+result_2 %>% kable(caption="Linear Regression vs. Random Forest") %>% 
+  kable_styling(latex_options="hold_position")
+```
+
+RMSE for random forest is bigger than that for linear regression, so we will keep using the linear regression for the
+remainder of this analysis.
+
+Until now, we did not use _R_ and _RA_ in our model and thought that we should not do so because these are the products of batting and pitching stats, respectively. But, let's try putting them in our next model:
+
+```{r result5, echo=FALSE, comment=NA}
+result <- bind_rows(result, tibble(Variables="R, RA, X1B, X2B, X3B, HR, BB, SB, SH, X123BA, HRA, BBA, SOA, E", RMSE=RMSE_4,
+                 Adjusted_R_squred=summary_4$adj.r.squared))
+result %>% kable(caption="RMSE Table 4") %>% 
+  kable_styling(latex_options="hold_position")
+```
+\newpage
+
+--------------------------------------------------------------
+```{r, echo=FALSE, comment=NA}
+summary_4
+```
+--------------------------------------------------------------
+RMSE and adjusted R-squared improved significantly from the previous model since, as mentioned previously,
+the run differential (R-RA) is very closely correlated with win. The question is "can we retain them in the final model?"
+
+Our initial thought was that because the batting and pitching stats produces R and RA, respectively, both of which then 
+results in winning, counting on all of batting/pitching stats and R/RA is duplicating and hence should not improve the model
+much. However, it turns out that including R/RA does improve our model a lot. Using a model like this, teams can predict
+their performance for the coming season, given predicted statistics for each of their players. Predicting players' future
+performance will be another very interesting research although it could be more complicated and less predictable. 
+\newpage
+
+* **Data Manipulation**
+
+Before, we talked about how the plots show that certain variables increase/decrease over time. 
+
+```{r, echo=FALSE}
+Teams %>%
+  group_by(group) %>%
+  summarize(group_mean = mean(HR)) %>%
+  kable(caption="Home runs for different eras") %>% 
+  kable_styling(latex_options="hold_position")
+```
+
+
+```{r echo=FALSE, message=FALSE}
+# Data manipulation to adjust for the mean differences among year groups 
+## X1B ##
+means_X1B <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(X1B)) %>%
+  mutate(adjust_X1B = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_X1B) %>% 
+  mutate(X1B = X1B + adjust_X1B) %>%
+  select(-adjust_X1B)
+
+## X2B ##
+means_X2B <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(X2B)) %>%
+  mutate(adjust_X2B = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_X2B) %>% 
+  mutate(X2B = X2B + adjust_X2B) %>%
+  select(-adjust_X2B)
+
+## X3B ##
+means_X3B <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(X3B)) %>%
+  mutate(adjust_X3B = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_X3B) %>% 
+  mutate(X3B = X3B + adjust_X3B) %>%
+  select(-adjust_X3B)
+
+## HR ##
+means_HR <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(HR)) %>%
+  mutate(adjust_HR = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_HR) %>% 
+  mutate(HR = HR + adjust_HR) %>%
+  select(-adjust_HR)
+
+## BB ##
+means_BB <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(BB)) %>%
+  mutate(adjust_BB = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_BB) %>% 
+  mutate(BB = BB + adjust_BB) %>%
+  select(-adjust_BB)
+
+## SB ##
+means_SB <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(SB)) %>%
+  mutate(adjust_SB = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_SB) %>% 
+  mutate(SB = SB + adjust_SB) %>%
+  select(-adjust_SB)
+
+## SH ##
+means_SH <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(SH)) %>%
+  mutate(adjust_SH = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_SH) %>% 
+  mutate(SH = SH + adjust_SH) %>%
+  select(-adjust_SH)
+
+## X123BA ##
+means_X123BA <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(X123BA)) %>%
+  mutate(adjust_X123BA = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_X123BA) %>% 
+  mutate(X123BA = X123BA + adjust_X123BA) %>%
+  select(-adjust_X123BA)
+
+## HRA ##
+means_HRA <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(HRA)) %>%
+  mutate(adjust_HRA = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_HRA) %>% 
+  mutate(HRA = HRA + adjust_HRA) %>%
+  select(-adjust_HRA)
+
+## BBA ##
+means_BBA <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(BBA)) %>%
+  mutate(adjust_BBA = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_BBA) %>% 
+  mutate(BBA = BBA + adjust_BBA) %>%
+  select(-adjust_BBA)
+
+## SOA ##
+means_SOA <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(SOA)) %>%
+  mutate(adjust_SOA = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_SOA) %>% 
+  mutate(SOA = SOA + adjust_SOA) %>%
+  select(-adjust_SOA)
+
+## E ##
+means_E <- Teams %>% 
+  group_by(group) %>%
+  summarize(group_mean = mean(E)) %>%
+  mutate(adjust_E = round(group_mean[4] - group_mean)) %>%
+  select(-group_mean)
+
+New_Teams <- Teams %>%
+  left_join(means_E) %>% 
+  mutate(E = E + adjust_E) %>%
+  select(-adjust_E)
+
+```
+
+![](figs/teams_vs_newteams.png)
+
+As shown in the plot on the left, there seem to be four groups of dots around each group's mean. This pattern can potentially be harmful to our analysis since for 1901~1960, teams won their games with fewer than 100 HR per year, but now, they are very unlikely to win that many games with the same number of HR. Winning formula has been changed, so using 
+the old data as it is means that we try to predict future winning with how they used to win in the past.
+
+To take this into account, we will make some adjustments to the dataset. On the right, we moved each point of earlier three year-groups towards the most recent '1991~2019' group by the mean difference between each group and '1991~2019'. The reason for moving towards the most recent is that at the end of the day, we are interested in predicting future, so the data most relevant to the recent days would be the most useful. 
+
+After adjusting all variables, we then fit our final model. Note that the prediction set and the validation set should be
+recreated because 'Teams' dataset is modified to 'New_Teams'.
+
+```{r, echo=FALSE, warning=FALSE}
+# Re-create prediction set and validation set
+set.seed(5, sample.kind="Rounding")
+validation_index <- createDataPartition(y = New_Teams$W, times = 1, p = 0.3, list = FALSE)
+prediction_set <- New_Teams[-validation_index,]
+validation_set <- New_Teams[validation_index,]
+
+# Re-create train set and test set
+set.seed(50, sample.kind="Rounding")
+test_index <- createDataPartition(y = prediction_set$W, times = 1, p = 0.3, list = FALSE)
+train_set <- prediction_set[-test_index,]
+test_set <- prediction_set[test_index,]
+
+# Data-manipulated model 
+fit <- lm(W ~ R + RA + X1B + X2B + X3B + HR + BB + SB + X123BA + HRA + BBA + SOA + E, data = train_set)
+y_hat <- predict(fit, test_set)
+RMSE_5 <- sqrt(mean((y_hat - test_set$W)^2)) #> 4.6549
+summary_5 <- summary(fit)
+```
+
+```{r result6, echo=FALSE, comment=NA}
+result_comp <- tibble(Model=c("Original Dataset", "Manipulated Dataset"), RMSE=c(RMSE_4,RMSE_5), 
+                 Adjusted_R_Squared=c(summary_4$adj.r.squared, summary_5$adj.r.squared))
+result_comp %>% kable(caption="Two Models with 'R,RA,X1B,X2B,X3B,HR,BB,SB,X123BA,HRA,BBA,SOA,E") %>% 
+  kable_styling(latex_options="hold_position")
+```
+
+Unfortunately, we did not see much difference. However, it makes more logical sense to adjust the data points towards
+today's standards, we will choose the 'data manipulated model' as our final model.
+\newpage
+
+## Results
+
+We now train our model using the prediction set, which is 70% of the entire dataset and is the sum of training and test set used for modeling. Afterwards, this model is tested on the validation set we kept out of our analysis from the beginning. 
+The result is as follows:
+
+```{r, echo=FALSE}
+# Final test using validation set
+fit <- lm(W ~ R + RA + X1B + X2B + X3B + HR + BB + SB + X123BA + HRA + BBA + SOA + E, data = prediction_set)
+y_hat <- predict(fit, validation_set)
+RMSE_val <- sqrt(mean((y_hat - validation_set$W)^2)) #> 4.6099
+summary_val <- summary(fit)
+```
+
+```{r result_final, echo=FALSE}
+result_final <- tibble(Variables="R, RA, X1B, X2B, X3B, HR, BB, SB, SH, X123BA, HRA, BBA, SOA, E(Data Manipulated)", 
+                       RMSE=RMSE_val, Adjusted_R_Squared=summary_val$adj.r.squared)
+result_final %>% kable(caption="Results on the validation set") %>%
+  column_spec(1, width = "10cm") %>%
+  kable_styling(latex_options="hold_position")
+```
+
+--------------------------------------------------------------
+```{r, echo=FALSE, comment=NA}
+summary_val
+```
+--------------------------------------------------------------
+
+The result is consistent with our analysis, and it seems that given all the variables contained in the model, our model can predict a team's number of wins for a season with &plusmn;4.6 wins.
+
+
+## Conclusion
+
+Although the final result was not too bad, there are limitations in our analysis. 
+
+1. The use of 30-year interval for the year groups was arbitrary. We could try different intervals to validate the optimal choice.
+
+2. Some of the 19 variables initially retained from _Teams_ dataset were chosen somewhat subjectively with prior baseball knowledge. It may be possible that a not-retained variable turns out to be suitable for our model.
+
+3. Baseball has frequently made rule changes, some of which are more radical than others. Though we adjusted our data to
+account for the mean differences among different periods of time, baseball now is very different from 100 years ago, or
+even 20 years ago. Using data that old to build a prediction model for today's standards could be inappropriate.
+
+Also, if you are a baseball fan, this analysis is not that fascinating, considering so many interesting research that
+has been going on, especially after _Moneyball_ emerged. As my first ever machine learning project from scratch, 
+I wanted to play around with the most accessible and clean dataset in order to focus more on applying what I learned 
+throughout the courses. 
+
+To make it more interesting and to get a glimpse of what kind of analysis can be done next, the following is the 
+random forest prediction grid for outcomes of batted balls. The data are provided by _Statcast_ on _Baseball Savant_ website and consist of all exit velocities and launch angles of batted balls in 2020. This data contains 43,309 rows, which is more than 15 times of _New Teams_ dataset, and MLB teams in 2020 played only 60 games as opposed to 162 because of Covid-19, so there is a ton of data to dive into for baseball. (The details of data collection and analysis are not shown here for the sake of not complicating this report)
+
+(Figures on the next page)
+
+No wonder why exit velocities and launch angles are discussed so much in the media these days. It is obvious that a certain
+combination of exit velocity and launch angle is destined to produce a certain outcome. If we can make the ball pop out of 
+the bat in the range of above 90 mph exit velocity and 10 ~ 25 launch angle, it is very likely to induce a hit or a home run. Furthermore, the exit velocity of above 110 mph will produce such outcomes regardless of the launch angle. 
+
+This kind of analysis would be very useful in predicting each player's statistics, which then can be used to predict 
+the team's statistics as we did in this report. The possible areas of research in baseball are so vast that what we saw in this report is only a tip of the iceberg. But still, the analysis provided in this report is useful for those who are 
+baseball fans and are beginners of machine learning.
+
+Just yesterday, May 19th, 2021, MLB witnessed sixth no-hitter of the season. This is very interesting because MLB's record
+for a single season's no-hitter is seven, and this season is only about 25% finished. These days, pitchers and batters incorporate data more and more, and it will be fun to dig deep into what is causing today's trend using data science. 
+\newpage
+
+![](figs/statcast_1.png){height=90%}
+
+![](figs/statcast_2.png){height=90%}
