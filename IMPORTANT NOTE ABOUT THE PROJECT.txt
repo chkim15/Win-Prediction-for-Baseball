@@ -1,0 +1,9 @@
+***IMPORTANT NOTE ABOUT THIS PROJECT***
+
+This is my first ever data project submitted for HarvardX Data Science certificate 
+and needs some corrections. Most importantly, I need to take into account the
+assumptions for the linear regression, which were not covered in the certificate
+program. Now that I am well aware of the assumptions that must be checked 
+before modeling, the result could change a lot from what is shown in this report.
+
+- written on 2022.01.13.
