@@ -29,7 +29,7 @@ This project leverages over 100 years of Major League Baseball (MLB) team statis
 
 ## **Repository Contents**
 - `Win_Prediction_for_Baseball.R`: Full codebase for data preprocessing, analysis, and modeling.
-- `Report.pdf`: Detailed project report with analysis, methodology, and results.
+- `Win_Prediction_for_Baseball-report.pdf`: Detailed project report with analysis, methodology, and results.
 
 ## **Future Work**
 - Predict individual player contributions to team wins.
