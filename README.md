@@ -1,3 +1,6 @@
+## **Context**
+This project is from 2020 when I started learning data science.
+
 # **MLB Win Prediction Using Statistical Modeling** ⚾
 
 ## **Project Overview**
